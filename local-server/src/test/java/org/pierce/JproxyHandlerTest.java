@@ -1,13 +1,15 @@
 package org.pierce;
 
 import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.*;
 import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.http.*;
+import io.netty.handler.codec.http.websocketx.BinaryWebSocketFrame;
 import org.pierce.handler.DebugHandler;
-import org.pierce.handler.JproxyHandler;
+import org.pierce.handler.NewJproxyHandler;
 import org.pierce.handler.TlsClientHandlerBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,9 +51,27 @@ public class JproxyHandlerTest {
                     ch.pipeline().addLast(TlsClientHandlerBuilder.getInstance().build(ch));
                 }
                 ch.pipeline().addLast(new DebugHandler("link-out"));
-                ch.pipeline().addLast(new JproxyHandler(new InetSocketAddress(JproxyProperties.getProperty("local-server.link-out.address"), Integer.parseInt(JproxyProperties.getProperty("local-server.remote-websocket-link-out.port")))));
+                ch.pipeline().addLast(new NewJproxyHandler(new InetSocketAddress(JproxyProperties.getProperty("local-server.link-out.address"), Integer.parseInt(JproxyProperties.getProperty("local-server.remote-websocket-link-out.port")))));
+                ch.pipeline().addLast(new ChannelDuplexHandler() {
+                    @Override
+                    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+                        if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
+                            ctx.fireChannelRead(binaryWebSocketFrame.content().copy());
+                        }
+                    }
+
+                    @Override
+                    public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+                        if (msg instanceof ByteBuf byteBuf) {
+                            ctx.write(new BinaryWebSocketFrame(byteBuf), promise);
+                            return;
+                        }
+                        //promise.tryFailure(new RuntimeException("msg instanceof ByteBuf byteBuf"));
+                    }
+                });
                 ch.pipeline().addLast(new HttpClientCodec());
                 ch.pipeline().addLast(new HttpObjectAggregator(65536));
+
                 ch.pipeline().addLast(new ChannelInboundHandlerAdapter() {
                     @Override
                     public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
@@ -62,9 +82,9 @@ public class JproxyHandlerTest {
                     public void channelActive(ChannelHandlerContext ctx) throws Exception {
                         log.info("channelActive");
                         FullHttpRequest fullHttpRequest = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/");
-                        fullHttpRequest.headers().set("Host","192.168.31.129");
-                        fullHttpRequest.headers().set("User-Agent","curl/8.14.1");
-                        fullHttpRequest.headers().set("Accept","*/*");
+                        fullHttpRequest.headers().set("Host", "192.168.31.129");
+                        fullHttpRequest.headers().set("User-Agent", "curl/8.14.1");
+                        fullHttpRequest.headers().set("Accept", "*/*");
                         ctx.writeAndFlush(fullHttpRequest);
                     }
                 });

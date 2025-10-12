@@ -49,6 +49,7 @@ public class DebugHandler extends ChannelDuplexHandler {
     }
 
     private void logObj(ChannelHandlerContext ctx, String direction, Object object) {
+        log.info("{} {} {} {},{}", UtilTools.formatChannelInfo(ctx), title, direction, object.getClass(), String.valueOf(object));
         if (!JproxyProperties.booleanVal("debug")) {
             return;
         }
@@ -63,7 +64,7 @@ public class DebugHandler extends ChannelDuplexHandler {
             }
             log.info(sb.toString());
         }
-        log.info("{} {} {} {},{}", UtilTools.formatChannelInfo(ctx), title, direction, object.getClass(), String.valueOf(object));
+
     }
 
     private void logBytes(ChannelHandlerContext ctx, String direction, ByteBuf buf) {

@@ -28,7 +28,7 @@ public class HttpProxyServerHandler extends ChannelInboundHandlerAdapter {
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
-
+        log.info("{}:{}", UtilTools.formatChannelInfo(ctx), msg);
 
         if (messageBridge != null) {
             messageBridge.bridge(ctx.channel(), msg);

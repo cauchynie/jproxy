@@ -29,16 +29,15 @@ public final class HttpProxyServerInitializer extends ChannelInitializer<SocketC
             ch.attr(SessionAttributes.NAME_LIST_CHECK).set(nameListCheck);
         }
 
-        if (JproxyProperties.booleanVal("tls-debug")) {
-            ch.pipeline().addLast(new DebugHandler("tls-link-in"));
-        }
+
         // 添加 TLS 处理器到管道
         if (JproxyProperties.booleanVal("local-server.link-in.tls")) {
+            if (JproxyProperties.booleanVal("tls-debug")) {
+                ch.pipeline().addLast(new DebugHandler("tls-link-in"));
+            }
             ch.pipeline().addLast(TlsServerHandlerBuilder.getInstance().build(ch));
         }
-        if (JproxyProperties.booleanVal("debug")) {
-            ch.pipeline().addLast(new DebugHandler("link in"));
-        }
+        ch.pipeline().addLast(new DebugHandler("link in"));
 
         ch.pipeline().addLast(new HttpServerCodec());
         ch.pipeline().addLast(new HttpProxyServerHandler());

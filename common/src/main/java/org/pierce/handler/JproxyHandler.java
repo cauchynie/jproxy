@@ -7,6 +7,7 @@ import io.netty.handler.codec.http.*;
 import io.netty.handler.codec.http.websocketx.*;
 import io.netty.util.CharsetUtil;
 import org.pierce.JproxyProperties;
+import org.pierce.UtilTools;
 import org.pierce.list.entity.MessageWrap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,10 +21,12 @@ import java.util.Base64;
 import java.util.LinkedList;
 import java.util.Queue;
 
+import static io.netty.handler.codec.http.websocketx.WebSocketClientHandshaker13.MAGIC_GUID;
+
 public class JproxyHandler extends ChannelDuplexHandler {
 
     // WebSocket握手使用的GUID
-    private static final String MAGIC_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    //private static final String MAGIC_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
     InetSocketAddress proxyAddress;
 
@@ -32,7 +35,9 @@ public class JproxyHandler extends ChannelDuplexHandler {
 
     final static Logger log = LoggerFactory.getLogger(JproxyHandler.class);
 
-    final Queue<MessageWrap> queue = new LinkedList<>();
+    final Queue<MessageWrap> writeQueue = new LinkedList<>();
+
+    final Queue<MessageWrap> readQueue = new LinkedList<>();
 
     public JproxyHandler(InetSocketAddress proxyAddress) {
         this.proxyAddress = proxyAddress;
@@ -82,6 +87,7 @@ public class JproxyHandler extends ChannelDuplexHandler {
 
     @Override
     public void channelRead(ChannelHandlerContext ctx, Object msg) {
+        log.info("{}-{}:{}", complete, UtilTools.formatChannelInfo(ctx), msg);
         if (!complete) {
             if (msg instanceof FullHttpResponse fullHttpResponse) {
                 if (fullHttpResponse.status().code() != 101) {
@@ -98,8 +104,8 @@ public class JproxyHandler extends ChannelDuplexHandler {
                 ctx.pipeline().remove("http-aggregator");
                 ctx.pipeline().addBefore(ctx.name(), "ws-decoder", new WebSocket13FrameDecoder(false, true, 65536, false));
                 ctx.pipeline().addBefore(ctx.name(), "ws-encoder", new WebSocket13FrameEncoder(true));
-                while (!queue.isEmpty()) {
-                    MessageWrap messageWrap = queue.remove();
+                while (!writeQueue.isEmpty()) {
+                    MessageWrap messageWrap = writeQueue.remove();
                     if (messageWrap.message() instanceof ByteBuf) {
                         BinaryWebSocketFrame binaryWebSocketFrame = new BinaryWebSocketFrame((ByteBuf) messageWrap.message());
                         ctx.writeAndFlush(binaryWebSocketFrame);
@@ -124,11 +130,16 @@ public class JproxyHandler extends ChannelDuplexHandler {
                             ", content=" + response.content().toString(CharsetUtil.UTF_8) + ')');
         }
 
+//        if (!complete) {
+//            //log.info("{}:{}", UtilTools.formatChannelInfo(ctx), msg.getClass());
+//            writeQueue.add(new MessageWrap(promise, msg));
+//            return;
+//        }
         WebSocketFrame frame = (WebSocketFrame) msg;
         if (frame instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
-            try{
+            try {
                 ctx.fireChannelRead(binaryWebSocketFrame.content().copy());
-            }finally{
+            } finally {
                 binaryWebSocketFrame.release();
             }
         } else if (frame instanceof PongWebSocketFrame) {
@@ -141,10 +152,10 @@ public class JproxyHandler extends ChannelDuplexHandler {
 
     @Override
     public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
-        //log.info("==> {}:{}", UtilTools.formatChannelInfo(ctx), msg.getClass());
+        log.info("{}-{}:{}", complete, UtilTools.formatChannelInfo(ctx), msg);
         if (!complete) {
             //log.info("{}:{}", UtilTools.formatChannelInfo(ctx), msg.getClass());
-            queue.add(new MessageWrap(promise, msg));
+            writeQueue.add(new MessageWrap(promise, msg));
             return;
         }
         if (msg instanceof ByteBuf) {
@@ -153,7 +164,7 @@ public class JproxyHandler extends ChannelDuplexHandler {
             ctx.write(binaryWebSocketFrame).addListener(new ChannelFutureListener() {
                 @Override
                 public void operationComplete(ChannelFuture future) throws Exception {
-                    if(!future.isSuccess()){
+                    if (!future.isSuccess()) {
                         binaryWebSocketFrame.release();
                     }
 
@@ -168,12 +179,12 @@ public class JproxyHandler extends ChannelDuplexHandler {
     @Override
     public void channelInactive(ChannelHandlerContext ctx) {
         log.info("WebSocket Client disconnected!");
-        while(!queue.isEmpty()){
-            MessageWrap messageWrap = queue.remove();
+        while (!writeQueue.isEmpty()) {
+            MessageWrap messageWrap = writeQueue.remove();
             messageWrap.promise().tryFailure(new Throwable("channelInactive"));
-            if(messageWrap.message() instanceof ByteBuf byteBuf){
+            if (messageWrap.message() instanceof ByteBuf byteBuf) {
                 byteBuf.release();
-            }else if(messageWrap.message() instanceof BinaryWebSocketFrame binaryWebSocketFrame){
+            } else if (messageWrap.message() instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
                 binaryWebSocketFrame.release();
             }
 

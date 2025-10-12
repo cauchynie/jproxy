@@ -1,27 +1,28 @@
 package org.pierce.bridge;
 
+import io.netty.bootstrap.Bootstrap;
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.*;
+import io.netty.channel.socket.SocketChannel;
+import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.handler.codec.http.websocketx.BinaryWebSocketFrame;
 import io.netty.util.AttributeKey;
-import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.GenericFutureListener;
-import org.pierce.JproxyProperties;
-import org.pierce.LocalServer;
-import org.pierce.MessageBridge;
+import io.netty.util.concurrent.*;
+import org.pierce.*;
 import org.pierce.exception.DirectiveDisallowException;
 import org.pierce.handler.DebugHandler;
-import org.pierce.handler.JproxyHandler;
+import org.pierce.handler.NewJproxyHandler;
 import org.pierce.handler.TlsClientHandlerBuilder;
 import org.pierce.list.Directive;
 import org.pierce.list.entity.ConnectType;
 import org.pierce.list.entity.MessageWrap;
 import org.pierce.list.entity.TryConnect;
-import org.pierce.pool.NettyChannelPoolManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.net.InetSocketAddress;
-import java.net.URISyntaxException;
 import java.util.LinkedList;
+import java.util.Map;
 import java.util.Queue;
 
 public class ByteBufMessageBridge implements MessageBridge {
@@ -33,110 +34,15 @@ public class ByteBufMessageBridge implements MessageBridge {
 
     public static final AttributeKey<Integer> TARGET_PORT = AttributeKey.valueOf("TARGET_PORT");
 
+//    public static final AttributeKey<Boolean> ACTIVE_FLAG = AttributeKey.valueOf("ACTIVE_FLAG");
+//
+//    public static final AttributeKey<List<ChannelPromise>> CHANNEL_PROMISES = AttributeKey.valueOf("CHANNEL_PROMISES");
+
     public static String proxyAddress = JproxyProperties.getProperty("local-server.link-out.address");
 
     public static int proxyPort = Integer.parseInt(JproxyProperties.getProperty("local-server.remote-websocket-link-out.port"));
 
     private static final Logger log = LoggerFactory.getLogger(ByteBufMessageBridge.class);
-
-    final static NettyChannelPoolManager localLinkOut = new NettyChannelPoolManager(new ChannelInitializer<>() {
-        @Override
-        protected void initChannel(Channel channel) {
-
-            if (JproxyProperties.booleanVal("debug")) {
-                channel.pipeline().addLast(new DebugHandler("byte-link-out"));
-            }
-            channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
-                @Override
-                public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
-                    //log.info("{}:{}", UtilTools.formatChannelInfo(ctx), msg.getClass());
-                    Channel linkIn = ctx.channel().attr(LINK_IN).get();
-                    if (linkIn != null) {
-                        if (!linkIn.isActive()) {
-                            //级联关闭
-                            ctx.channel().close();
-                            return;
-                        }
-                        linkIn.attr(LINK_OUT).set(ctx.channel());
-                        linkIn.writeAndFlush(msg);
-                    }
-                }
-
-                @Override
-                public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-                    log.error("Throwable", cause);
-                    if (ctx.channel().isActive()) {
-                        ctx.channel().close();
-                    }
-                }
-
-                @Override
-                public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-                    log.info("channelInactive");
-                    NettyChannelPoolManager.release(channel);
-                    Channel linkIn = ctx.channel().attr(LINK_IN).get();
-                    //级联关闭
-                    if (linkIn != null) {
-                        linkIn.close();
-                    }
-
-                }
-            });
-        }
-    });
-
-    final static NettyChannelPoolManager remoteLinkOut = new NettyChannelPoolManager(new ChannelInitializer<>() {
-        @Override
-        protected void initChannel(Channel channel) throws URISyntaxException {
-            //log.info("proxy {}:{}", proxyAddress, proxyPort);
-            if (JproxyProperties.booleanVal("tls-debug")) {
-                channel.pipeline().addLast(new DebugHandler("tls-link-out"));
-            }
-            if (JproxyProperties.booleanVal("local-server.link-out.tls")) {
-                channel.pipeline().addLast(TlsClientHandlerBuilder.getInstance().build(channel));
-            }
-            if (JproxyProperties.booleanVal("debug")) {
-                channel.pipeline().addLast(new DebugHandler("byte-proxy-link-out-0"));
-            }
-            channel.pipeline().addLast(new JproxyHandler(new InetSocketAddress(proxyAddress, proxyPort)));
-            channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
-                @Override
-                public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
-                    //log.info("{}:{}", UtilTools.formatChannelInfo(ctx), msg.getClass());
-                    Channel linkIn = ctx.channel().attr(LINK_IN).get();
-                    if (linkIn != null) {
-                        if (!linkIn.isActive()) {
-                            //级联关闭
-                            ctx.channel().close();
-                            return;
-                        }
-                        linkIn.attr(LINK_OUT).set(ctx.channel());
-                        linkIn.writeAndFlush(msg);
-                    }
-                }
-
-                @Override
-                public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
-                    log.error("Throwable", cause);
-                    if (ctx.channel().isActive()) {
-                        ctx.channel().close();
-                    }
-                }
-
-                @Override
-                public void channelInactive(ChannelHandlerContext ctx) throws Exception {
-                    log.info("channelInactive");
-                    NettyChannelPoolManager.release(channel);
-                    Channel linkIn = ctx.channel().attr(LINK_IN).get();
-                    //级联关闭
-                    if (linkIn != null) {
-                        linkIn.close();
-                    }
-
-                }
-            });
-        }
-    });
 
     Channel lastLinkOut = null;
 
@@ -199,9 +105,9 @@ public class ByteBufMessageBridge implements MessageBridge {
     public void bridge0(ConnectType connectType, String targetAddress, int targetPort, Channel linkIn, ChannelPromise channelPromise) {
         Future<Channel> channelFuture;
         if (connectType.getDirective() == Directive.FULL_CONNECT) {
-            channelFuture = remoteLinkOut.acquire(targetAddress, targetPort);
+            channelFuture = acquireB(targetAddress, targetPort);
         } else if (connectType.getDirective() == Directive.DIRECT_CONNECT) {
-            channelFuture = localLinkOut.acquire(targetAddress, targetPort);
+            channelFuture = acquireA(targetAddress, targetPort);
         } else {
             channelPromise.tryFailure(new RuntimeException("connectType.getDirective():" + connectType.getDirective()));
             return;
@@ -244,5 +150,233 @@ public class ByteBufMessageBridge implements MessageBridge {
             }
         });
 
+    }
+
+    public Promise<Channel> acquireA(String target, int port) {
+
+        EventExecutor executor = ImmediateEventExecutor.INSTANCE;
+        Promise<Channel> channelPromise = executor.newPromise();
+
+        Bootstrap bootstrap = new Bootstrap();
+        bootstrap.group(Jproxy.getEventLoopGroup());
+        bootstrap.channel(NioSocketChannel.class);
+        bootstrap.handler(new ChannelInitializer<SocketChannel>() {
+            @Override
+            protected void initChannel(SocketChannel channel) throws Exception {
+
+
+                channel.pipeline().addLast(new DebugHandler("byte-link-out"));
+                channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+
+                    @Override
+                    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+                        log.info("{}:{}", UtilTools.formatChannelInfo(ctx), msg);
+
+                        {
+                            StringBuilder sb = new StringBuilder();
+                            ChannelPipeline pipeline = ctx.pipeline();
+                            sb.append("===== Pipeline Structure =====\n");
+                            for (Map.Entry<String, ChannelHandler> entry : pipeline) {
+                                String name = entry.getKey();
+                                ChannelHandler handler = entry.getValue();
+                                sb.append(String.format("Handler [%s] -> %s\n", name, handler.getClass().getSimpleName()));
+                            }
+                            log.info(sb.toString());
+                        }
+
+                        log.info("{}:{}", UtilTools.formatChannelInfo(ctx), msg);
+                        Channel linkIn = ctx.channel().attr(LINK_IN).get();
+                        if (linkIn != null) {
+                            if (!linkIn.isActive()) {
+                                //级联关闭
+                                ctx.channel().close();
+                                return;
+                            }
+                            linkIn.attr(LINK_OUT).set(ctx.channel());
+                            linkIn.writeAndFlush(msg).addListener(new ChannelFutureListener() {
+                                @Override
+                                public void operationComplete(ChannelFuture future) throws Exception {
+                                    if (!future.isSuccess()) {
+                                        if (msg instanceof ByteBuf byteBuf) {
+                                            byteBuf.release();
+                                        }
+                                    }
+                                }
+                            });
+                            ;
+                        }
+                    }
+
+                    @Override
+                    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+                        log.error("Throwable", cause);
+                        if (ctx.channel().isActive()) {
+                            ctx.channel().close();
+                        }
+                        channelPromise.tryFailure(cause);
+                    }
+
+                    @Override
+                    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+                        log.info("channelInactive");
+                        
+                        Channel linkIn = ctx.channel().attr(LINK_IN).get();
+                        //级联关闭
+                        if (linkIn != null) {
+                            linkIn.close();
+                        }
+
+                    }
+
+                    @Override
+                    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+                        channelPromise.trySuccess(ctx.channel());
+                    }
+                });
+            }
+
+        });
+        log.info("connect to {}:{} start", target, port);
+        ChannelFuture cf = bootstrap.connect(target, port);
+        cf.addListener(new ChannelFutureListener() {
+            @Override
+            public void operationComplete(ChannelFuture future) throws Exception {
+                if (future.isSuccess()) {
+                    log.info("connect to {}:{} future.isSuccess", target, port);
+                    return;
+                } else {
+                    channelPromise.tryFailure(future.cause());
+                    log.info("connect to {}:{} future.fail", target, port);
+                }
+            }
+        });
+        return channelPromise;
+    }
+
+    public Promise<Channel> acquireB(String target, int port) {
+
+        EventExecutor executor = ImmediateEventExecutor.INSTANCE;
+        Promise<Channel> channelPromise = executor.newPromise();
+
+        Bootstrap bootstrap = new Bootstrap();
+        bootstrap.group(Jproxy.getEventLoopGroup());
+        bootstrap.channel(NioSocketChannel.class);
+        bootstrap.handler(new ChannelInitializer<SocketChannel>() {
+            @Override
+            protected void initChannel(SocketChannel channel) throws Exception {
+                //log.info("proxy {}:{}", proxyAddress, proxyPort);
+
+                if (JproxyProperties.booleanVal("local-server.link-out.tls")) {
+                    if (JproxyProperties.booleanVal("tls-debug")) {
+                        channel.pipeline().addLast(new DebugHandler("tls-link-out"));
+                    }
+                    channel.pipeline().addLast(TlsClientHandlerBuilder.getInstance().build(channel));
+                }
+                channel.pipeline().addLast(new DebugHandler("byte-proxy-link-out-0"));
+                channel.pipeline().addLast(new NewJproxyHandler(new InetSocketAddress(proxyAddress, proxyPort)));
+                channel.pipeline().addLast(new ChannelDuplexHandler() {
+                    @Override
+                    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+                        log.info("{}:{}", UtilTools.formatChannelInfo(ctx), "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+                        if (msg instanceof BinaryWebSocketFrame binaryWebSocketFrame) {
+
+                            ctx.fireChannelRead(binaryWebSocketFrame.content().copy());
+                        }
+                        log.info("{}:{}", UtilTools.formatChannelInfo(ctx), "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB");
+                    }
+
+                    @Override
+                    public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) throws Exception {
+                        if (msg instanceof ByteBuf byteBuf) {
+                            ctx.write(new BinaryWebSocketFrame(byteBuf), promise);
+                            return;
+                        }
+                    }
+                });
+                channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+
+                    @Override
+                    public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+                        log.info("{}:{}", UtilTools.formatChannelInfo(ctx), msg);
+
+                        {
+                            StringBuilder sb = new StringBuilder();
+                            ChannelPipeline pipeline = ctx.pipeline();
+                            sb.append("===== Pipeline Structure =====\n");
+                            for (Map.Entry<String, ChannelHandler> entry : pipeline) {
+                                String name = entry.getKey();
+                                ChannelHandler handler = entry.getValue();
+                                sb.append(String.format("Handler [%s] -> %s\n", name, handler.getClass().getSimpleName()));
+                            }
+                            log.info(sb.toString());
+                        }
+
+                        log.info("{}:{}", UtilTools.formatChannelInfo(ctx), msg);
+                        Channel linkIn = ctx.channel().attr(LINK_IN).get();
+                        if (linkIn != null) {
+                            if (!linkIn.isActive()) {
+                                //级联关闭
+                                ctx.channel().close();
+                                return;
+                            }
+                            linkIn.attr(LINK_OUT).set(ctx.channel());
+                            linkIn.writeAndFlush(msg).addListener(new ChannelFutureListener() {
+                                @Override
+                                public void operationComplete(ChannelFuture future) throws Exception {
+                                    if (!future.isSuccess()) {
+                                        if (msg instanceof ByteBuf byteBuf) {
+                                            byteBuf.release();
+                                        }
+                                    }
+                                }
+                            });
+                            ;
+                        }
+                    }
+
+                    @Override
+                    public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
+                        log.error("Throwable", cause);
+                        if (ctx.channel().isActive()) {
+                            ctx.channel().close();
+                        }
+                        channelPromise.tryFailure(cause);
+                    }
+
+                    @Override
+                    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+                        log.info("channelInactive");
+                        
+                        Channel linkIn = ctx.channel().attr(LINK_IN).get();
+                        //级联关闭
+                        if (linkIn != null) {
+                            linkIn.close();
+                        }
+
+                    }
+
+                    @Override
+                    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+                        channelPromise.trySuccess(ctx.channel());
+                    }
+                });
+            }
+
+        });
+        log.info("connect to {}:{} start", target, port);
+        ChannelFuture cf = bootstrap.connect(target, port);
+        cf.addListener(new ChannelFutureListener() {
+            @Override
+            public void operationComplete(ChannelFuture future) throws Exception {
+                if (future.isSuccess()) {
+                    log.info("connect to {}:{} future.isSuccess", target, port);
+                    return;
+                } else {
+                    channelPromise.tryFailure(future.cause());
+                    log.info("connect to {}:{} future.fail", target, port);
+                }
+            }
+        });
+        return channelPromise;
     }
 }
